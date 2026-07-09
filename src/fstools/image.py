@@ -615,6 +615,54 @@ def stage_package_cache(staging_dir: str, packages_dir: str, tarballs_dir: str, 
     print(f"    Cached {cached}/{len(resolved_packages)} package tarballs")
 
 
+def create_offline_archives(packages_dir: str, tarballs_dir: str, build_dir: str, sq_staging: str):
+    print("[*] Creating offline system archives (tar.zst) for installer...")
+    images_dir = os.path.join(sq_staging, "usr/lib/freeside/images")
+    os.makedirs(images_dir, exist_ok=True)
+
+    for group in ["base", "system"]:
+        archive_name = f"freeside-{group}-v1.tar.zst"
+        archive_path = os.path.join(images_dir, archive_name)
+        print(f"    Building {archive_name}...")
+
+        # Resolve packages for this specific group
+        resolved = resolve_packages(packages_dir, [group])
+
+        # Stage files in a temporary directory
+        group_staging = os.path.join(build_dir, f"staging-{group}")
+        if os.path.exists(group_staging):
+            shutil.rmtree(group_staging)
+        os.makedirs(group_staging)
+
+        try:
+            # Extract all packages for this group
+            for pkg_name in resolved:
+                tarball = find_package_tarball(packages_dir, tarballs_dir, pkg_name)
+                if tarball:
+                    extract_package_tarball(tarball, group_staging)
+            
+            # Apply layout fixes similar to the live rootfs
+            create_usrmerge_layout(group_staging)
+            create_runtime_directories(group_staging)
+            fix_permissions(group_staging)
+            fix_musl_dynamic_linker(group_staging)
+
+            # Tar the staging directory with zstd compression
+            subprocess.run([
+                "tar",
+                "--zstd",
+                "-cf",
+                archive_path,
+                "-C",
+                group_staging,
+                "."
+            ], check=True)
+            print(f"    Created {archive_name} ({os.path.getsize(archive_path):,} bytes)")
+        finally:
+            if os.path.exists(group_staging):
+                shutil.rmtree(group_staging)
+
+
 def build_squashfs_rootfs(packages_dir: str, tarballs_dir: str, build_dir: str, staging_dir: str, groups: List[str]) -> str:
     squashfs_output = os.path.join(staging_dir, "rootfs.squashfs")
 
@@ -650,6 +698,7 @@ def build_squashfs_rootfs(packages_dir: str, tarballs_dir: str, build_dir: str, 
         create_runtime_directories(sq_staging)
         provision_etc(sq_staging)
         stage_package_cache(sq_staging, packages_dir, tarballs_dir, build_dir, resolved)
+        create_offline_archives(packages_dir, tarballs_dir, build_dir, sq_staging)
 
         # Installer
         installer_src = os.path.join(build_dir, "freeside-install")
