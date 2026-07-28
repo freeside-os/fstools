@@ -232,22 +232,49 @@ def inject_boot_symlinks(staging_dir: str):
         with open(os.path.join(svc_dir, "override.conf"), "w") as f:
             f.write(OOM_OVERRIDE_CONTENT)
 
-    systemd_system_dir = os.path.join(etc_dir, "systemd/system")
-    os.makedirs(systemd_system_dir, exist_ok=True)
-    
-    with open(os.path.join(systemd_system_dir, "run-initramfs-live.mount"), "w") as f:
-        f.write(LIVE_MOUNT_CONTENT)
-        
-    with open(os.path.join(systemd_system_dir, "sysroot.mount"), "w") as f:
-        f.write(SYSROOT_MOUNT_CONTENT)
-        
-    wants_dir = os.path.join(systemd_system_dir, "initrd.target.wants")
-    os.makedirs(wants_dir, exist_ok=True)
-    
-    symlink_path = os.path.join(wants_dir, "sysroot.mount")
-    if os.path.exists(symlink_path) or os.path.islink(symlink_path):
-        os.remove(symlink_path)
-    os.symlink("../sysroot.mount", symlink_path)
+    generators_dir = os.path.join(staging_dir, "usr/lib/systemd/system-generators")
+    os.makedirs(generators_dir, exist_ok=True)
+    generator_script = os.path.join(generators_dir, "freeside-live-generator")
+    generator_content = """#!/usr/bin/env bash
+set -eu
+
+NORMAL_DIR="$1"
+
+if grep -q -E '(freeside\\.live|rd\\.live\\.image)' /proc/cmdline 2>/dev/null; then
+    cat <<'EOF' > "$NORMAL_DIR/run-initramfs-live.mount"
+[Unit]
+Description=Mount Live Boot Medium
+DefaultDependencies=no
+After=udevadm-trigger-service.service
+
+[Mount]
+What=/dev/disk/by-label/FREESIDE_LIVE
+Where=/run/initramfs/live
+Type=iso9660
+Options=ro,nofail
+EOF
+
+    cat <<'EOF' > "$NORMAL_DIR/sysroot.mount"
+[Unit]
+Description=Mount Live Root Filesystem
+DefaultDependencies=no
+Requires=run-initramfs-live.mount
+After=run-initramfs-live.mount
+
+[Mount]
+What=/run/initramfs/live/rootfs.squashfs
+Where=/sysroot
+Type=squashfs
+Options=ro,loop
+EOF
+
+    mkdir -p "$NORMAL_DIR/initrd.target.wants"
+    ln -sf "$NORMAL_DIR/sysroot.mount" "$NORMAL_DIR/initrd.target.wants/sysroot.mount"
+fi
+"""
+    with open(generator_script, "w") as f:
+        f.write(generator_content)
+    os.chmod(generator_script, 0o755)
 
 
 def build_cpio_archive(staging_dir: str, output_path: str):

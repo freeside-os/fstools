@@ -16,8 +16,6 @@ MOTD = """
 Freeside OS
 
 Welcome back to the grid, Cowboy.
-To carve out the local storage fabric and flash the system into
-your deck, execute the provisioning terminal:
 
    $ freeside-install
 
@@ -40,7 +38,8 @@ RUNTIME_DIRECTORIES = [
 BOOT_OPTIONS = (
     "console=ttyS0,115200 "
     "earlyprintk=serial,ttyS0,115200 "
-    "systemd.volatile=overlay"
+    "systemd.volatile=overlay "
+    "freeside.live"
 )
 
 KERNEL_PKG = "linux-kernel"
