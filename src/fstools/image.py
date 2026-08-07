@@ -4,6 +4,7 @@ import tarfile
 import tomllib
 import shutil
 import subprocess
+import gzip
 import click
 from typing import List, Optional
 from fstools.pkg import resolve_package_dependencies, load_all_manifests, collect_deps
@@ -36,7 +37,8 @@ RUNTIME_DIRECTORIES = [
 ]
 
 BOOT_OPTIONS = (
-    "console=ttyS0,115200 "
+    "console=tty0 "
+    "console=ttyS0,115200n8 "
     "earlyprintk=serial,ttyS0,115200 "
     "systemd.volatile=overlay "
     "freeside.live"
@@ -47,6 +49,9 @@ KERNEL_MEMBER = "usr/lib/freeside/linux/kernel/vmlinuz"
 
 INITRAMFS_PKG = "base-initramfs"
 INITRAMFS_MEMBER = "usr/lib/freeside/initramfs.cpio"
+
+LIVE_INITRAMFS_PKG = "live-initramfs"
+LIVE_INITRAMFS_MEMBER = "usr/lib/freeside/initramfs-live.cpio.gz"
 
 BOOTLOADER_PKG = "systemd"
 BOOTLOADER_MEMBER = "usr/lib/systemd/boot/efi/systemd-bootx64.efi"
@@ -747,16 +752,21 @@ def write_loader_configs(iso_staging: str):
     with open(os.path.join(entries_dir, "live.conf"), "w") as f:
         f.write("title   Freeside OS Live Installer\n")
         f.write("linux   /vmlinuz\n")
-        f.write("initrd  /initramfs.cpio.gz\n")
+        f.write("initrd  /initramfs-base.cpio.gz\n")
+        f.write("initrd  /initramfs-live.cpio.gz\n")
         f.write(f"options {BOOT_OPTIONS}\n")
 
 
 def stage_boot_files(iso_staging: str, packages_dir: str, tarballs_dir: str):
     print("[*] Staging boot-critical files from package tarballs...")
+    base_initrd_gz = os.path.join(iso_staging, "initramfs-base.cpio.gz")
+    live_initrd_gz = os.path.join(iso_staging, "initramfs-live.cpio.gz")
+
     boot_files = [
-        (KERNEL_PKG,     KERNEL_MEMBER,     os.path.join(iso_staging, "vmlinuz")),
-        (INITRAMFS_PKG,  INITRAMFS_MEMBER,  os.path.join(iso_staging, "initramfs.cpio.gz")),
-        (BOOTLOADER_PKG, BOOTLOADER_MEMBER, os.path.join(iso_staging, "EFI/BOOT/BOOTX64.EFI")),
+        (KERNEL_PKG,         KERNEL_MEMBER,         os.path.join(iso_staging, "vmlinuz")),
+        (INITRAMFS_PKG,      INITRAMFS_MEMBER,      base_initrd_gz),
+        (LIVE_INITRAMFS_PKG, LIVE_INITRAMFS_MEMBER, live_initrd_gz),
+        (BOOTLOADER_PKG,     BOOTLOADER_MEMBER,     os.path.join(iso_staging, "EFI/BOOT/BOOTX64.EFI")),
     ]
 
     for pkg_name, member_path, output_path in boot_files:
@@ -792,7 +802,8 @@ def build_efi_image(iso_staging: str):
     mcopy(os.path.join(iso_staging, "loader/loader.conf"), "/loader/loader.conf")
     mcopy(os.path.join(iso_staging, "loader/entries/live.conf"), "/loader/entries/live.conf")
     mcopy(os.path.join(iso_staging, "vmlinuz"), "/vmlinuz")
-    mcopy(os.path.join(iso_staging, "initramfs.cpio.gz"), "/initramfs.cpio.gz")
+    mcopy(os.path.join(iso_staging, "initramfs-base.cpio.gz"), "/initramfs-base.cpio.gz")
+    mcopy(os.path.join(iso_staging, "initramfs-live.cpio.gz"), "/initramfs-live.cpio.gz")
 
 
 def build_iso(iso_staging: str, output_path: str):

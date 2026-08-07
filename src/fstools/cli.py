@@ -3,6 +3,7 @@ from fstools.common import load_config
 from fstools.pkg import pkg_group
 from fstools.image import image_group
 from fstools.initrd import initrd_group
+from fstools.sandbox import sandbox_group
 
 @click.group()
 @click.option('--simple', is_flag=True, help="Produce simplified, script-friendly output.")
@@ -17,6 +18,7 @@ def main(ctx, simple):
 main.add_command(pkg_group)
 main.add_command(image_group)
 main.add_command(initrd_group)
+main.add_command(sandbox_group)
 
 if __name__ == "__main__":
     main(obj={})

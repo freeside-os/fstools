@@ -12,30 +12,6 @@ from typing import Optional
 # Constants
 # ==============================================================================
 
-LIVE_MOUNT_CONTENT = """[Unit]
-Description=Mount Live Boot Medium
-DefaultDependencies=no
-After=udevadm-trigger-service.service
-
-[Mount]
-What=/dev/disk/by-label/FREESIDE_LIVE
-Where=/run/initramfs/live
-Type=iso9660
-Options=ro,nofail
-"""
-
-SYSROOT_MOUNT_CONTENT = """[Unit]
-Description=Mount Live Root Filesystem
-DefaultDependencies=no
-Requires=run-initramfs-live.mount
-After=run-initramfs-live.mount
-
-[Mount]
-What=/run/initramfs/live/rootfs.squashfs
-Where=/sysroot
-Type=squashfs
-Options=ro,loop
-"""
 
 REQUIRED_BOOT_PACKAGES = [
     "musl",
@@ -176,11 +152,9 @@ def find_package_archive(packages_dir: str, package_name: str) -> Optional[Path]
     
     matches = list(p_dir.glob(f"{package_name}-[0-9]*.tar.gz")) + list(p_dir.glob(f"{package_name}-[0-9]*.tgz"))
     if not matches:
-        matches = list(p_dir.glob(f"{package_name}-*.tar.gz")) + list(p_dir.glob(f"{package_name}-*.tgz"))
-        
-    if not matches:
         return None
     return max(matches, key=lambda p: p.stat().st_mtime)
+
 
 
 def extract_early_boot_payload(archive_path: Path, dest_dir: str):
@@ -232,49 +206,7 @@ def inject_boot_symlinks(staging_dir: str):
         with open(os.path.join(svc_dir, "override.conf"), "w") as f:
             f.write(OOM_OVERRIDE_CONTENT)
 
-    generators_dir = os.path.join(staging_dir, "usr/lib/systemd/system-generators")
-    os.makedirs(generators_dir, exist_ok=True)
-    generator_script = os.path.join(generators_dir, "freeside-live-generator")
-    generator_content = """#!/usr/bin/env bash
-set -eu
 
-NORMAL_DIR="$1"
-
-if grep -q -E '(freeside\\.live|rd\\.live\\.image)' /proc/cmdline 2>/dev/null; then
-    cat <<'EOF' > "$NORMAL_DIR/run-initramfs-live.mount"
-[Unit]
-Description=Mount Live Boot Medium
-DefaultDependencies=no
-After=udevadm-trigger-service.service
-
-[Mount]
-What=/dev/disk/by-label/FREESIDE_LIVE
-Where=/run/initramfs/live
-Type=iso9660
-Options=ro,nofail
-EOF
-
-    cat <<'EOF' > "$NORMAL_DIR/sysroot.mount"
-[Unit]
-Description=Mount Live Root Filesystem
-DefaultDependencies=no
-Requires=run-initramfs-live.mount
-After=run-initramfs-live.mount
-
-[Mount]
-What=/run/initramfs/live/rootfs.squashfs
-Where=/sysroot
-Type=squashfs
-Options=ro,loop
-EOF
-
-    mkdir -p "$NORMAL_DIR/initrd.target.wants"
-    ln -sf "$NORMAL_DIR/sysroot.mount" "$NORMAL_DIR/initrd.target.wants/sysroot.mount"
-fi
-"""
-    with open(generator_script, "w") as f:
-        f.write(generator_content)
-    os.chmod(generator_script, 0o755)
 
 
 def build_cpio_archive(staging_dir: str, output_path: str):
@@ -427,7 +359,9 @@ def build_initrd_cmd(ctx, packages_dir, output, work_dir):
             if not archive:
                 click.secho(f"[-] ERROR: Required boot dependency '{pkg}' was not found inside packages directory!", err=True, fg="red")
                 sys.exit(1)
+            print(f"[*] Processing boot package '{pkg}': {archive}")
             extract_early_boot_payload(archive, staging_dir)
+
 
         inject_boot_symlinks(staging_dir)
         build_cpio_archive(staging_dir, out_path)

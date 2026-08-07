@@ -547,8 +547,16 @@ def generate_files_ledger(staging_dir: str) -> str:
 
 def install_package(tarball_path: str, prefix: str = ""):
     """Installs a compiled package tarball into the container root /."""
-    print(f"{prefix}Installing {os.path.basename(tarball_path)}")
-    subprocess.run(["tar", "-xzf", tarball_path, "--exclude=meta/*", "-C", "/"], check=True)
+    pkg_basename = os.path.basename(tarball_path)
+    if pkg_basename.startswith("musl-"):
+        print(f"{prefix}Skipping installation of {pkg_basename} (base C library already present in sandbox)")
+        return
+    print(f"{prefix}Installing {pkg_basename}")
+    from fstools.image import extract_package_tarball
+    extract_package_tarball(tarball_path, "/")
+
+
+
     
     usr_sbin = "/usr/sbin"
     if os.path.exists(usr_sbin) and not os.path.islink(usr_sbin):
@@ -609,10 +617,29 @@ def build_package_impl(pkg_name: str, packages_dir: str, build_dir: str, output_
     tarball_name = f"{pkg_name}-{pkg_version}-1.tar.gz"
     tarball_path = os.path.join(output_dir, tarball_name)
     
+    is_stale = False
     if os.path.isfile(tarball_path):
+        tarball_mtime = os.path.getmtime(tarball_path)
+        manifest_mtime = os.path.getmtime(manifest_path)
+        if manifest_mtime > tarball_mtime:
+            is_stale = True
+        else:
+            for source in manifest.sources:
+                if source.file:
+                    src_file_path = os.path.join(pkg_dir, source.file)
+                    if os.path.exists(src_file_path) and os.path.getmtime(src_file_path) > tarball_mtime:
+                        is_stale = True
+                        break
+
+    if os.path.isfile(tarball_path) and not is_stale:
         print(f"{prefix}Compiling... skipped")
         install_package(tarball_path, prefix)
         return True
+
+    if is_stale:
+        print(f"{prefix}Manifest or sources modified, recompiling...")
+        os.remove(tarball_path)
+
 
     print(f"{prefix}Compiling {pkg_name}-{pkg_version} (group: {pkg_group})...")
 
