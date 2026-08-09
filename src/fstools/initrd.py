@@ -27,7 +27,8 @@ REQUIRED_BOOT_PACKAGES = [
     "xz",
     "zstd",
     "zlib",
-    "json-c"
+    "json-c",
+    "lvm2"
 ]
 
 PAYLOAD_EXCLUDE_FILTERS = [
