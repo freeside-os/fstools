@@ -1,8 +1,10 @@
+import glob
 import os
 import sys
 import re
 import shutil
 import subprocess
+import tempfile
 import urllib.request
 import urllib.error
 import textwrap
@@ -1112,3 +1114,173 @@ def verify_cmd(ctx, pkgname, all):
     else:
         click.echo(f"\nVerification successful: {total_packages}/{total_packages} package(s) are valid.")
         sys.exit(0)
+
+
+# ==============================================================================
+# Operational Logic & CLI: CHECKSUM / LOGS / AUDIT
+# ==============================================================================
+
+_LOG_ERROR_PATTERNS = (
+    re.compile(r"(?i)\berror:"),
+    re.compile(r"(?i)fatal error:"),
+    re.compile(r"(?i)undefined reference"),
+    re.compile(r"(?i)CMake Error"),
+    re.compile(r"(?i)configure: error:"),
+    re.compile(r"(?i)collect2: error:"),
+    re.compile(r"(?i)cannot find -l"),
+)
+
+
+def extract_log_diagnostics(log_content: str, tail: int = 120) -> str:
+    """Extracts compiler/linker error context and trailing lines from a build log."""
+    lines = log_content.splitlines()
+    matched_sections: List[str] = []
+    seen_lines: Set[int] = set()
+
+    for idx, line in enumerate(lines):
+        if any(pat.search(line) for pat in _LOG_ERROR_PATTERNS):
+            start = max(0, idx - 2)
+            end = min(len(lines), idx + 3)
+            matched_sections.append(f"--- Context around line {idx + 1} ---")
+            for j in range(start, end):
+                if j not in seen_lines:
+                    prefix = ">> " if j == idx else "   "
+                    matched_sections.append(f"{prefix}{j + 1}: {lines[j]}")
+                    seen_lines.add(j)
+
+    tail_lines = lines[-tail:] if tail > 0 else []
+    out_parts: List[str] = []
+    if matched_sections:
+        out_parts.append("=== Extracted Error Signatures ===")
+        out_parts.extend(matched_sections)
+    if tail_lines:
+        out_parts.append(f"=== Last {len(tail_lines)} Lines ===")
+        out_parts.extend(tail_lines)
+    return "\n".join(out_parts)
+
+
+def query_osv_vulnerabilities(queries: List[Dict[str, object]], timeout: int = 10) -> Dict[str, object]:
+    """Queries the OSV batch API for known vulnerabilities."""
+    if not queries:
+        return {"results": []}
+    payload = json.dumps({"queries": queries}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.osv.dev/v1/querybatch",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+@pkg_group.command(name="checksum")
+@click.argument("target")
+@click.option("--insecure", is_flag=True, help="Skip SSL verification for remote downloads.")
+def checksum_cmd(target: str, insecure: bool):
+    """Fetch a source URL (or inspect a local file) and print its SHA256 checksum."""
+    try:
+        if os.path.isfile(target):
+            click.echo(compute_sha256(target))
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest_path = os.path.join(tmpdir, "artifact")
+            if insecure:
+                ctx = ssl._create_unverified_context()
+                with urllib.request.urlopen(target, context=ctx) as resp, open(dest_path, "wb") as out_f:
+                    shutil.copyfileobj(resp, out_f)
+            else:
+                with urllib.request.urlopen(target) as resp, open(dest_path, "wb") as out_f:
+                    shutil.copyfileobj(resp, out_f)
+            click.echo(compute_sha256(dest_path))
+    except Exception as e:
+        click.secho(f"Error computing checksum for '{target}': {e}", err=True, fg="red")
+        sys.exit(1)
+
+
+@pkg_group.command(name="logs")
+@click.argument("pkgname")
+@click.option("--tail", default=120, show_default=True, type=int, help="Number of trailing log lines to display.")
+@click.pass_context
+def logs_cmd(ctx, pkgname: str, tail: int):
+    """Display extracted compiler errors and tail output from the latest build log."""
+    cfg = ctx.obj["CONFIG"]
+    pattern = os.path.join(cfg.build_dir, f"{pkgname}-*.log")
+    log_files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    if not log_files:
+        click.secho(f"No build logs found for package '{pkgname}' in {cfg.build_dir}.", err=True, fg="red")
+        sys.exit(1)
+
+    latest = log_files[0]
+    try:
+        with open(latest, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        click.echo(f"Log file: {latest}")
+        click.echo(extract_log_diagnostics(content, tail=tail))
+    except Exception as e:
+        click.secho(f"Failed to read log '{latest}': {e}", err=True, fg="red")
+        sys.exit(1)
+
+
+@pkg_group.command(name="audit")
+@click.argument("pkgname", required=False)
+@click.option("--all", "all_pkgs", is_flag=True, help="Audit all packages in the repository.")
+@click.option("--json", "as_json", is_flag=True, help="Emit structured JSON output.")
+@click.pass_context
+def audit_cmd(ctx, pkgname: Optional[str], all_pkgs: bool, as_json: bool):
+    """Audit package manifests and query OSV security feeds for known CVEs."""
+    if pkgname and all_pkgs:
+        click.secho("Error: Cannot specify both a package name and --all", err=True, fg="red")
+        sys.exit(1)
+    if not pkgname and not all_pkgs:
+        all_pkgs = True
+
+    cfg = ctx.obj["CONFIG"]
+    manifests = load_all_manifests_safe(cfg.packages_dir)
+    targets = sorted(manifests.keys()) if all_pkgs else ([pkgname] if pkgname in manifests else [])
+
+    if not targets:
+        click.secho(f"No matching packages found to audit in {cfg.packages_dir}.", err=True, fg="red")
+        sys.exit(1)
+
+    queries = [
+        {"package": {"name": name, "ecosystem": "Alpine:v3.20"}, "version": manifests[name].package.version}
+        for name in targets
+    ]
+
+    osv_status = "ok"
+    vulns_by_pkg: Dict[str, List[str]] = {name: [] for name in targets}
+    try:
+        resp = query_osv_vulnerabilities(queries)
+        for name, item in zip(targets, resp.get("results", [])):
+            vulns_by_pkg[name] = [v.get("id", "UNKNOWN") for v in item.get("vulns", [])]
+    except Exception as e:
+        osv_status = f"offline ({e})"
+
+    results = []
+    for name in targets:
+        m = manifests[name]
+        missing_checksums = any(
+            (s.url or s.file) and (not s.checksum or not s.checksum.value)
+            for s in m.sources
+        )
+        results.append({
+            "package": name,
+            "version": m.package.version,
+            "vulnerabilities": vulns_by_pkg.get(name, []),
+            "missing_checksum": missing_checksums,
+        })
+
+    if as_json:
+        click.echo(json.dumps({"osv_status": osv_status, "packages": results}, indent=2))
+        return
+
+    click.echo(f"Audit feed status: {osv_status}")
+    for r in results:
+        vulns = r["vulnerabilities"]
+        warn = " [MISSING_CHECKSUM]" if r["missing_checksum"] else ""
+        if vulns:
+            click.echo(f"✗ {r['package']} ({r['version']}): CVEs {', '.join(vulns)}{warn}")
+        else:
+            click.echo(f"✓ {r['package']} ({r['version']}): 0 known CVEs{warn}")

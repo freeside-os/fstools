@@ -73,3 +73,55 @@ def test_config_straylight_fallbacks(monkeypatch):
     assert cfg.packages_dir == "/tmp/sl_pkgs"
     assert cfg.build_dir == "/tmp/sl_build"
     assert cfg.output_dir == "/tmp/sl_output"
+
+
+def test_pkg_checksum_local_file(tmp_path):
+    sample = tmp_path / "sample.tar.gz"
+    sample.write_bytes(b"freeside-test-payload")
+    runner = CliRunner()
+    result = runner.invoke(main, ["pkg", "checksum", str(sample)])
+    assert result.exit_code == 0
+    digest = result.output.strip()
+    assert len(digest) == 64
+    assert all(c in "0123456789abcdef" for c in digest)
+
+
+def test_pkg_logs_extracts_errors(tmp_path, monkeypatch):
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    log_file = build_dir / "zlib-20261113-000001.log"
+    log_file.write_text(
+        "checking gcc... ok\n"
+        "src/foo.c:12:5: error: implicit declaration of function 'bar'\n"
+        "make: *** [Makefile:10: foo.o] Error 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FSTOOLS_BUILD_DIR", str(build_dir))
+    runner = CliRunner()
+    result = runner.invoke(main, ["pkg", "logs", "zlib", "--tail", "10"])
+    assert result.exit_code == 0
+    assert "Extracted Error Signatures" in result.output
+    assert "implicit declaration of function 'bar'" in result.output
+
+
+def test_pkg_audit_json(tmp_path, monkeypatch):
+    pkgs_dir = tmp_path / "packages"
+    pkg_dir = pkgs_dir / "demo"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "package.manifest").write_text(
+        '[package]\nname = "demo"\nversion = "1.2.3"\ndescription = "demo"\ngroup = "extra"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FSTOOLS_PACKAGES_DIR", str(pkgs_dir))
+    import fstools.pkg as pkg_mod
+    monkeypatch.setattr(
+        pkg_mod,
+        "query_osv_vulnerabilities",
+        lambda queries, timeout=10: {"results": [{"vulns": [{"id": "CVE-2026-0001"}]}]},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["pkg", "audit", "demo", "--json"])
+    assert result.exit_code == 0
+    assert "CVE-2026-0001" in result.output
+    assert '"package": "demo"' in result.output
