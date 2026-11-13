@@ -832,7 +832,7 @@ def convert_cmd(pkgname):
 @click.option("--keep-sandbox", is_flag=True, help="Keep the build sandbox and workspace directories")
 @click.pass_context
 def build_cmd(ctx, pkg, group, with_deps, keep_all_logs, keep_sandbox):
-    """Build package(s) inside the container sandbox."""
+    """Build package(s) as root, it should run inside the container sandbox."""
     if os.getuid() != 0:
         click.secho("Error: build command must be run with root/sudo privileges.", err=True, fg="red")
         sys.exit(1)
